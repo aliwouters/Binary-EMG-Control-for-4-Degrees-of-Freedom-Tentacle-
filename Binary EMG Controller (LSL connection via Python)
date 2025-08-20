@@ -1,0 +1,86 @@
+import time
+import numpy as np
+import serial
+from pylsl import StreamInlet, resolve_stream
+
+# -------------------- CONFIGURATION --------------------
+STREAM_TYPE = 'EEG'
+COM_PORT = 'COM13'
+BAUD_RATE = 9600
+
+M1_channels = [0, 1]
+M2_channels = [2, 3]
+M3_channels = [4, 5]
+M4_channels = [6, 7]
+
+ACTIVATION_THRESHOLD = 2500
+buffer_size = 30
+send_interval = 1.0
+
+# -------------------- INITIALIZATION --------------------
+print("Looking for LSL stream...")
+streams = resolve_stream('type', STREAM_TYPE)
+inlet = StreamInlet(streams[0])
+print("LSL stream connected.")
+
+print(f"Connecting to Arduino on {COM_PORT}...")
+ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+time.sleep(2)
+ser.reset_input_buffer()
+ser.reset_output_buffer()
+print("Arduino connected.")
+
+last_command = "M1:90;M2:90"
+ser.write((last_command + "\r\n").encode())
+print(f"Sent to Arduino: {last_command}")
+
+emg_buffer = []
+last_send_time = time.time()
+
+# -------------------- MAIN LOOP --------------------
+print("Starting EMG loop...")
+try:
+    while True:
+        sample, _ = inlet.pull_sample()
+        emg_buffer.append(sample)
+
+        if len(emg_buffer) >= buffer_size:
+            window = np.array(emg_buffer[-buffer_size:]).T
+            smoothed = np.mean(np.abs(window), axis=1)
+
+            m1_active = np.any(smoothed[M1_channels] > ACTIVATION_THRESHOLD)
+            m2_active = np.any(smoothed[M2_channels] > ACTIVATION_THRESHOLD)
+            m3_active = np.any(smoothed[M3_channels] > ACTIVATION_THRESHOLD)
+            m4_active = np.any(smoothed[M4_channels] > ACTIVATION_THRESHOLD)
+
+            m1_angle = 90
+            m2_angle = 90
+
+            # Priority handling for simultaneous activations
+            if m1_active and not m2_active:
+                m1_angle = 50
+            elif m2_active and not m1_active:
+                m1_angle = 120
+            elif m1_active and m2_active:
+                m1_angle = 90  # or any special value you want
+
+            if m3_active and not m4_active:
+                m2_angle = 50
+            elif m4_active and not m3_active:
+                m2_angle = 120
+            elif m3_active and m4_active:
+                m2_angle = 90  # or any special value
+
+            command = f"M1:{m1_angle};M2:{m2_angle}"
+
+            now = time.time()
+            if command != last_command and (now - last_send_time >= send_interval):
+                ser.write((command + "\r\n").encode())
+                ser.flush()
+                print(f"Sent to Arduino: {command}")
+                last_command = command
+                last_send_time = now
+
+except KeyboardInterrupt:
+    print("Exiting cleanly...")
+    ser.close()
